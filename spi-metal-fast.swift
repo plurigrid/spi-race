@@ -341,3 +341,163 @@ print("    2. simd_xor — warp-level reduction (no shared memory)")
 print("    3. \(TG_SIZE)-thread threadgroups — 4x fewer partials than 256")
 print("    4. Two-pass GPU reduction — partials reduced on GPU, not CPU")
 print("    5. Best-of-3 timing — eliminates launch jitter")
+
+// =====================================================================
+// Section 5: FLICKS, COLORS, TRIT-TICKS — THE THREE CLOCKS
+// =====================================================================
+//
+// The SPI index space maps 1:1 onto time-base ticks:
+//   color_at(seed, flick_index) — one color per flick
+//   color_at(seed, trit_tick_index) — one color per trit-tick
+//   color_at(seed, sample_index * tps) — one color per BCI sample
+//
+// At peak GPU throughput, how many real-time seconds of each
+// time base can the GPU fingerprint per wall-clock second?
+
+let FLICK: UInt64 = 705_600_000      // flicks per real-time second
+let EPOCH1: UInt64 = 141_120_000     // trit-ticks per real-time second
+let FLICKS_PER_TRIT: UInt64 = 5     // 1 trit-tick = 5 flicks
+
+print("""
+
+  ═══════════════════════════════════════════════════════════════
+  THE THREE CLOCKS: FLICKS × COLORS × TRIT-TICKS
+  ═══════════════════════════════════════════════════════════════
+
+  One color = one splitmix64 evaluation at a tick index.
+  The GPU doesn't care which clock — it processes indices.
+  The MEANING of each index depends on which time base you use.
+
+  Constants:
+    1 flick      = 1/705,600,000 s  ≈ 1.417 ns
+    1 trit-tick  = 5 flicks         ≈ 7.086 ns
+    1 color      = 1 splitmix64(seed, index)
+""")
+
+// Use the measured peak rate
+let peakColorsPerSec = peakRate * 1_000_000.0 // convert M/s to raw /s
+
+// Flick-space throughput
+let flickRealtime = peakColorsPerSec / Double(FLICK)
+let flickDaysPerSec = flickRealtime / 86400.0
+let flickYearsPerSec = flickRealtime / (86400.0 * 365.25)
+
+// Trit-tick-space throughput
+let tritRealtime = peakColorsPerSec / Double(EPOCH1)
+let tritDaysPerSec = tritRealtime / 86400.0
+let tritYearsPerSec = tritRealtime / (86400.0 * 365.25)
+
+print("  THROUGHPUT IN EACH CLOCK DOMAIN")
+print("  ──────────────────────────────────────────────────────────")
+let flickMinsPerSec = flickRealtime / 60.0
+let tritMinsPerSec = tritRealtime / 60.0
+
+print("  Clock        Ticks/s (real)     GPU eval rate         Real-time per wall-second")
+print("  ───────────  ─────────────────  ────────────────────  ──────────────────────────────")
+print("  Flick        705,600,000        \(String(format: "%6.1f B indices/s", peakRate/1000))    \(String(format: "%.1f s", flickRealtime)) = \(String(format: "%.1f min", flickMinsPerSec)) of flick-space")
+print("  Trit-tick    141,120,000        \(String(format: "%6.1f B indices/s", peakRate/1000))    \(String(format: "%.1f s", tritRealtime)) = \(String(format: "%.1f min", tritMinsPerSec)) of trit-tick-space")
+print("  Color (raw)  N/A (abstract)     \(String(format: "%6.1f B colors/s", peakRate/1000))    (pure index space, no clock)")
+print()
+print("  Interpretation:")
+print("    The GPU evaluates \(String(format: "%.1f", peakRate/1000)) billion splitmix64 calls per wall-second.")
+print("    If each call corresponds to one flick (1.417 ns):")
+print("      → covers \(String(format: "%.1f", flickRealtime)) real-time seconds = \(String(format: "%.1f", flickMinsPerSec)) minutes of flick-indexed entropy")
+print("    If each call corresponds to one trit-tick (7.086 ns):")
+print("      → covers \(String(format: "%.1f", tritRealtime)) real-time seconds = \(String(format: "%.1f", tritMinsPerSec)) minutes of trit-tick entropy")
+print("    But BCI devices subsample: 250 Hz uses only 250 ticks per real-second.")
+print("    That's why the BCI multiplier below reaches YEARS per wall-second.")
+
+// =====================================================================
+// Section 6: BCI DEVICE REAL-TIME MULTIPLIER
+// =====================================================================
+
+print("""
+
+  BCI REAL-TIME MULTIPLIER
+  ──────────────────────────────────────────────────────────
+  How many years of continuous recording can the GPU fingerprint
+  per wall-clock second, at each device's sample rate?
+
+  GPU processes sample boundaries in tick-space:
+    index = sample_k × (ticks_per_second / rate)
+""")
+print("  Device                     Rate       Ticks/sample    Realtime multiplier")
+print("  ─────────────────────────  ─────────  ────────────    ───────────────────────────")
+
+let bciDevices: [(String, UInt64, String)] = [
+    ("OpenBCI Cyton EEG",         250,    "flick"),
+    ("LiveAmp EEG",               500,    "flick"),
+    ("BioSemi ActiveTwo EEG",     2048,   "E2"),
+    ("g.tec g.USBamp EEG",        4800,   "flick"),
+    ("BrainProducts actiCHamp+",  5000,   "flick"),
+    ("Neuropixels AP",            30000,  "flick"),
+    ("CD audio 44.1 kHz",         44100,  "flick"),
+    ("DAC audio 48 kHz",          48000,  "flick"),
+    ("Medtronic DBS 130 Hz",      130,    "E2"),
+    ("Boston Sci DBS 185 Hz",     185,    "E2"),
+    ("Delsys Trigno EMG",         1926,   "unbnd"),
+    ("FLIR Blackfly camera",      227,    "unbnd"),
+    ("Neuropixels LFP",           2500,   "flick"),
+    ("DSD512 audio",              22579200, "E2"),
+]
+
+for (name, rate, epoch) in bciDevices {
+    // GPU can evaluate peakColorsPerSec splitmix64 calls per second.
+    // Each sample = 1 call. So GPU processes peakColorsPerSec samples/s.
+    // Real-time produces `rate` samples/s.
+    // Multiplier = peakColorsPerSec / rate.
+    let multiplier = peakColorsPerSec / Double(rate)
+    let secsPerWallSec = multiplier
+    let daysPerWallSec = secsPerWallSec / 86400.0
+    let yearsPerWallSec = secsPerWallSec / (86400.0 * 365.25)
+
+    let tpsStr: String
+    if epoch == "flick" && FLICK % rate == 0 {
+        tpsStr = String(format: "%12d", FLICK / rate)
+    } else if epoch == "E2" {
+        tpsStr = "    (E2 u128)"
+    } else {
+        tpsStr = "   (unbounded)"
+    }
+
+    let rtStr: String
+    if yearsPerWallSec >= 1.0 {
+        rtStr = String(format: "%.1f years/s", yearsPerWallSec)
+    } else if daysPerWallSec >= 1.0 {
+        rtStr = String(format: "%.1f days/s", daysPerWallSec)
+    } else {
+        rtStr = String(format: "%.1f hours/s", secsPerWallSec / 3600.0)
+    }
+
+    print("  \(name.padding(toLength: 25, withPad: " ", startingAt: 0))  \(String(format: "%9d", rate))  \(tpsStr)    \(rtStr)")
+}
+
+// =====================================================================
+// Section 7: THE CONVERSION TABLE
+// =====================================================================
+
+print("""
+
+  THE CONVERSION TABLE
+  ──────────────────────────────────────────────────────────
+  1 trit-tick  = 5 flicks          = 7.086 ns
+  1 flick      = 1/5 trit-tick     = 1.417 ns
+  1 color      = 1 index evaluation = 1/\(String(format: "%.1f", peakRate/1000))B wall-clock seconds on GPU
+
+  At peak (\(String(format: "%.1f", peakRate/1000)) B colors/s):
+    1 wall-second GPU work = \(String(format: "%.1f B", peakColorsPerSec/1e9)) color evaluations
+                           = \(String(format: "%.1f B", peakColorsPerSec * 5 / 1e9)) flick-quanta of entropy
+                           = \(String(format: "%.1f B", peakColorsPerSec / 1e9)) trit-tick-quanta of entropy
+                           = \(String(format: "%.1f", flickRealtime)) seconds at flick resolution (every tick)
+                           = \(String(format: "%.1f", tritRealtime)) seconds at trit-tick resolution (every tick)
+                           = \(String(format: "%.1f", flickMinsPerSec)) / \(String(format: "%.1f", tritMinsPerSec)) minutes of flick / trit-tick
+  But subsampled at BCI rates:
+                           = \(String(format: "%.1f", peakColorsPerSec / 250.0 / 86400 / 365.25)) years of 250 Hz EEG
+                           = \(String(format: "%.1f", peakColorsPerSec / 30000.0 / 86400)) days of 30 kHz Neuropixels
+                           = \(String(format: "%.1f", peakColorsPerSec / 48000.0 / 86400)) days of 48 kHz audio
+
+  The GPU doesn't distinguish clocks. It processes indices.
+  The clock domain is a compile-time choice of which divisor table
+  maps sample boundaries to indices. The XOR fingerprint is the same
+  regardless — that's the embarrassingly parallel invariant.
+""")
