@@ -26,7 +26,10 @@ This is a **pure function**: no state, no side effects, no coordination. Every i
 | `spi-metal-fast.swift` | **Optimized GPU**: 16/thr ILP, `simd_xor` warp reduction, 1024 threadgroups, two-pass GPU reduce — **54.9 B/s** |
 | `spi-metal-ultra.swift` | **Maximum GPU**: 64/thr, 8-way ILP, branchless hot loop, fused params, N sweep — **94.7 B/s** |
 | `spi-metal-vec.swift` | **Strategy shootout**: ulong2 vectorized GPU, scalar-wide GPU comparison — ties ultra at **95.7 B/s** |
+| `spi-metal-clocks.swift` | **Clock domain race**: color vs flick vs trit-tick head-to-head, fused 3-clock kernel — flick **91.3 B/s** beats dense |
 | `spi-neon.c` | **CPU racer**: 8/16-ILP, single-core + 10-core pthreads — **12.9 B/s** multi-core |
+| `LEADERBOARD.md` | Full results table, optimization history, clock domain analysis |
+| `race-all.sh` | Run all racers and produce leaderboard |
 
 ### Multi-Language Racers
 
@@ -53,35 +56,54 @@ This is a **pure function**: no state, no side effects, no coordination. Every i
 
 ## Race Results (Apple M5, 10-core, March 2026)
 
+### Single Clock Domain
+
 | Rank | Backend | Peak M/s | Peak B/s | Notes |
 |------|---------|----------|----------|-------|
 | **1** | **Metal GPU Ultra** | **94,685** | **94.7 B** | 64/thr, 8-way ILP, branchless, fused params |
 | 2 | Metal GPU Vec2 | 95,655 | 95.7 B | ulong2 vectorized (ties ultra) |
-| 3 | Metal GPU Fast | 54,900 | 54.9 B | 16/thr, 4-way ILP, SIMD warp reduction |
-| 4 | Metal GPU Baseline | 10,600 | 10.6 B | 1/thr, CPU-side partial reduce |
-| 5 | C -O3 10-core | 12,931 | 12.9 B | 8-ILP pthreads |
-| 6 | Zig L2 10-core | ~11,500 | ~11.5 B | 8-wide unroll |
-| 7 | Julia L3 10-core | ~10,500 | ~10.5 B | `@simd` + `Threads.@threads` |
-| 8 | Swift GCD 10-core | ~9,900 | ~9.9 B | GCD `concurrentPerform` |
-| 9 | C -O3 single-core | 2,588 | 2.6 B | 8-ILP scalar |
-| 10 | Babashka | 3.2 | 0.003 B | SCI interpreter, unchecked-math |
-| 11 | Python | 2.6 | 0.003 B | CPython 3.9 scalar |
-| Python L0 | 0.3 M/s | — | CPython baseline |
-| Python FFI | 2,900 M/s | 11,000 M/s | ctypes into `libspi.dylib` — same as native |
+| 3 | Metal GPU Clocks (flick) | 91,308 | 91.3 B | folded golden-stride, sparse beats dense |
+| 4 | Metal GPU Clocks (trit) | 87,830 | 87.8 B | folded golden-stride |
+| 5 | Metal GPU Fast | 54,900 | 54.9 B | 16/thr, 4-way ILP, SIMD warp reduction |
+| 6 | Metal GPU Baseline | 10,600 | 10.6 B | 1/thr, CPU-side partial reduce |
+| 7 | C -O3 10-core | 12,931 | 12.9 B | 8-ILP pthreads |
+| 8 | Zig L2 10-core | ~11,500 | ~11.5 B | 8-wide unroll |
+| 9 | Julia L3 10-core | ~10,500 | ~10.5 B | `@simd` + `Threads.@threads` |
+| 10 | Swift GCD 10-core | ~9,900 | ~9.9 B | GCD `concurrentPerform` |
+| 11 | C -O3 single-core | 2,588 | 2.6 B | 8-ILP scalar |
+| 12 | Babashka | 3.2 | 0.003 B | SCI interpreter, unchecked-math |
+| 13 | Python | 2.6 | 0.003 B | CPython 3.9 scalar |
+| - | Python FFI | ~11,000 | ~11 B | ctypes into `libspi.dylib` — same as native |
 
-### GPU Benchmarks — Ultra (`spi-metal-ultra.swift`)
+### Clock Domain Race
 
-| N | GPU time | GPU M/s | GB/s (3B/color) | Threadgroups |
-|---|----------|---------|-----------------|--------------|
-| 100M | 2.0 ms | 49,509 | 148.5 | 1,526 |
-| **500M** | **5.3 ms** | **94,685** | **280.8** | **7,630** |
-| 1B | 11.7 ms | 85,362 | 256.1 | 15,259 |
-| 2B | 24.9 ms | 80,407 | 241.2 | 30,518 |
+| Domain | Stride (250 Hz) | 100M M/s | 500M M/s | Notes |
+|--------|-----------------|----------|----------|-------|
+| Color (raw) | 1 | 83,741 | 74,774 | Dense indices |
+| **Flick** | 2,822,400 | 85,671 | **91,308** | **Sparse beats dense by 22% at 500M** |
+| Trit-tick | 564,480 | 85,699 | 87,830 | Sparse beats dense by 17% at 500M |
 
-Peak: **94.7 B colors/s**, 280.8 GB/s bandwidth (M5 Apple Silicon).
+The stride is folded into the golden constant on the CPU: `golden_stride = GOLDEN * stride`. The GPU hot loop is identical across all clock domains — **flicks and trit-ticks are zero-cost abstractions**. The sparse stride pattern actually *reduces* GPU cache bank conflicts, making time-base-indexed colors faster than raw sequential indices.
 
-GPU vs 10-core CPU: **7.3x speedup** (95 B/s GPU vs 12.9 B/s 10-core C -O3).
-GPU vs single-core: **36.6x speedup** (95 B/s GPU vs 2.6 B/s single-core C -O3).
+### Fused 3-Clock Kernel
+
+One GPU dispatch produces 3 XOR fingerprints simultaneously (color + flick + trit-tick):
+
+| Metric | Value |
+|--------|-------|
+| Peak samples/s | 24,469 M (24.5 B) |
+| Peak colors/s (3x) | 73,408 M (73.4 B) |
+| vs 3x sequential | 0.95x (12 accumulators cause register pressure) |
+
+### BCI Real-Time Multipliers
+
+At GPU peak throughput, how many years/days of continuous recording can we fingerprint per wall-second?
+
+| Device | Rate | Color | Flick | Trit-tick |
+|--------|------|-------|-------|-----------|
+| OpenBCI EEG | 250 Hz | 10.6 yr/s | 10.3 yr/s | 10.6 yr/s |
+| Neuropixels AP | 30 kHz | 31.9 d/s | 32.5 d/s | 32.7 d/s |
+| Audio 48 kHz | 48 kHz | 19.8 d/s | 19.6 d/s | 20.0 d/s |
 
 ### GPU Optimization History
 
@@ -91,15 +113,19 @@ GPU vs single-core: **36.6x speedup** (95 B/s GPU vs 2.6 B/s single-core C -O3).
 | spi-metal-fast | 54.9 | 5.2x | 16/thr, SIMD warp, GPU reduce |
 | spi-metal-ultra | 94.7 | 8.9x | 64/thr, 8-way ILP, branchless |
 | spi-metal-vec (ulong2) | 95.7 | ~1x (tied) | Vector types don't help on M5 |
+| spi-metal-clocks (flick) | 91.3 | — | Folded stride, sparse beats dense |
+| spi-metal-clocks (fused) | 73.4 (3x) | — | 3 domains in 1 dispatch |
 
-### GPU Benchmarks — Baseline (`spi-metal.swift`)
+GPU vs 10-core CPU: **7.3-12.3x speedup** across all clock domains.
+GPU vs single-core: **36.6x speedup**.
 
-| N | GPU time | GPU M/s | GB/s (3B/color) | Threadgroups |
-|---|----------|---------|-----------------|--------------|
-| 100M | 10.7 ms | 9,344 | 28.03 | 390,625 |
-| **1B** | **95.2 ms** | **10,507** | **31.52** | **3,906,250** |
+### What Didn't Help
 
-BCI long-duration: 1 hour of Neuropixels AP (108M samples) fingerprinted in 10 ms on GPU. All XOR fingerprints match CPU reference at every scale.
+- **NEON vectorized splitmix64** — NEON lacks `vmulq_u64`. Can't vectorize 64-bit integer multiply.
+- **16-way ILP** — Register pressure on both CPU (M5 P-core) and GPU. 8-ILP is the sweet spot.
+- **128 colors/thread** — Too much register pressure, drops GPU occupancy. 64 is optimal.
+- **Double-pump command buffers** — GPU already saturated at single dispatch for N >= 200M.
+- **Fused 3-clock kernel** — 12 accumulators (4x3 domains) cause register pressure. 3x sequential is 5% faster.
 
 ## Time Bases
 
