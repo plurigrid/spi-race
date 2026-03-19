@@ -1,4 +1,5 @@
 .zig-cache/
 zig-out/
 swift-racer
+spi-metal
 .triad_opts_*

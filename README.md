@@ -22,6 +22,7 @@ This is a **pure function**: no state, no side effects, no coordination. Every i
 | `spi-flicks.zig` | **Flick time base** (705.6 MHz): frame-aligned color generation, NTSC snow point demo |
 | `spi-trit-tick.zig` | **Trit-tick time base** (4 epochs): precomputed BCI device divisor tables, epoch cross-validation race, BCI snow points, cross-modal alignment |
 | `vibe_kanban.zig` | CatColab theories as SPI-indexed parallel data structures: Fokker-Planck, DAG gating, theory-typed fingerprints |
+| `spi-metal.swift` | **Metal GPU racer**: MSL compute shaders, threadgroup reduction, GPU scaling 1M-1B, BCI tick-space, multi-core CPU comparison |
 
 ### Multi-Language Racers
 
@@ -48,14 +49,30 @@ This is a **pure function**: no state, no side effects, no coordination. Every i
 
 ## Race Results (10-core Apple Silicon M-series)
 
-| Lang | 1T (100M) | MT (1B) | Notes |
-|------|-----------|---------|-------|
+| Backend | 1T (100M) | MT (1B) | Notes |
+|---------|-----------|---------|-------|
+| **Metal GPU** | **7,113 M/s** | **10,507 M/s** | MSL threadgroup reduction, M5 Apple Silicon |
 | Zig L2 | 2,902 M/s | 11,483 M/s | 8-wide unroll, ~97% of 3 GHz ceiling |
 | Julia L3 | 2,775 M/s | 10,563 M/s | `@simd` + `Threads.@threads` |
-| Swift L3 | 2,551 M/s | 9,887 M/s | GCD `concurrentPerform` |
+| Swift GCD | 2,551 M/s | 9,887 M/s | GCD `concurrentPerform` |
+| Swift GPU | — | 10,756 M/s | Metal via `spi-metal.swift` |
 | Babashka L2 | 6 M/s | 13 M/s | JVM interpreter ceiling |
 | Python L0 | 0.3 M/s | — | CPython baseline |
 | Python FFI | 2,900 M/s | 11,000 M/s | ctypes into `libspi.dylib` — same as native |
+
+### GPU Benchmarks (`spi-metal.swift`)
+
+| N | GPU time | GPU M/s | GB/s (3B/color) | Threadgroups |
+|---|----------|---------|-----------------|--------------|
+| 1M | 0.24 ms | 4,083 | 12.25 | 3,907 |
+| 10M | 0.95 ms | 10,524 | 31.57 | 39,063 |
+| 100M | 10.7 ms | 9,344 | 28.03 | 390,625 |
+| 500M | 46.6 ms | 10,728 | 32.19 | 1,953,125 |
+| **1B** | **95.2 ms** | **10,507** | **31.52** | **3,906,250** |
+
+Peak: **10.6 B colors/s**, 31.9 GB/s bandwidth, 255 Gbit/s bitrate (compute-bound, no memory store).
+
+BCI long-duration: 1 hour of Neuropixels AP (108M samples) fingerprinted in 10 ms on GPU. All XOR fingerprints match CPU reference at every scale.
 
 ## Time Bases
 
