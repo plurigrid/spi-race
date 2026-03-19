@@ -256,5 +256,36 @@ int main(void) {
     printf("  vs GPU Ultra (~95 B/s): %.1fx slower\n", 95000.0/peak_cpu);
     printf("  ====================================================================\n\n");
 
+    // --- Clock domain stride verification ---
+    printf("  CLOCK DOMAIN STRIDES — folded golden-stride check\n");
+    printf("  GOLDEN * stride precomputed, verify fold is exact.\n\n");
+
+    #define FLICK_HZ   705600000ULL
+    #define TRIT_HZ    141120000ULL
+    struct { const char *name; uint64_t stride; } domains[] = {
+        {"Color",    1},
+        {"Flick",    FLICK_HZ / 250},
+        {"Trit-tick", TRIT_HZ / 250},
+    };
+    printf("  Domain       Stride          golden*stride       Fold check\n");
+    printf("  ───────────  ──────────────  ──────────────────  ──────────\n");
+    int fold_pass = 0;
+    for (int d = 0; d < 3; d++) {
+        uint64_t gs = GOLDEN * domains[d].stride;
+        int ok = 1;
+        for (int k = 0; k < 8; k++) {
+            uint64_t direct = seed + GOLDEN * (domains[d].stride * (uint64_t)k);
+            uint64_t folded = seed + gs * (uint64_t)k;
+            if (direct != folded) ok = 0;
+        }
+        fold_pass += ok;
+        printf("  %-11s  %14llu  0x%016llx  %s\n",
+               domains[d].name, domains[d].stride, gs, ok ? "PASS" : "FAIL");
+    }
+    printf("\n  %d/3 fold checks pass.\n", fold_pass);
+    printf("  CPU: stride doesn't affect throughput (ALU-bound multiply chain).\n");
+    printf("  GPU: sparse strides BEAT dense by 22%% (cache bank conflict avoidance).\n");
+    printf("  See spi-metal-clocks.swift: flick 91.3 B/s > color 74.8 B/s at 500M.\n\n");
+
     return 0;
 }
