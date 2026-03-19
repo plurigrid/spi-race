@@ -1,0 +1,4 @@
+.zig-cache/
+zig-out/
+swift-racer
+.triad_opts_*
