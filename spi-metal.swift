@@ -275,15 +275,146 @@ print("  GPU (1 dispatch, \((npSamples + TG_SIZE - 1) / TG_SIZE) threadgroups): 
 print("  CPU reference:                           0x\(String(cpuFull, radix: 16))")
 print("  Match: \(gpuFull.xor == cpuFull ? "PASS" : "FAIL")")
 
+print("  Match: \(gpuFull.xor == cpuFull ? "PASS" : "FAIL")\n")
+
+// --- Section 4: GPU scaling — 1M to 1B ---
+print("""
+  GPU SCALING: 1M → 1B COLORS
+  How throughput scales with problem size on the GPU.
+""")
+print("  N             Time ms      M/s       GB/s (3B/color)   Threadgroups")
+print("  -----------   ---------   --------   ---------------   ------------")
+
+for n in [1_000_000, 5_000_000, 10_000_000, 50_000_000, 100_000_000, 500_000_000, 1_000_000_000] {
+    _ = gpuXOR(device: device, pipe: xorPipe, queue: queue, seed: SEED, n: 1000)
+    let gpu = gpuXOR(device: device, pipe: xorPipe, queue: queue, seed: SEED, n: n)
+    let ms = Double(gpu.ns) / 1e6
+    let rate = gpu.ns == 0 ? 0 : Int(Double(n) / Double(gpu.ns) * 1000)
+    let gbps = Double(n) * 3.0 / Double(gpu.ns)  // 3 bytes per RGB color
+    let nGroups = (n + TG_SIZE - 1) / TG_SIZE
+    let label: String
+    if n >= 1_000_000_000 { label = "\(n / 1_000_000_000)B" }
+    else if n >= 1_000_000 { label = "\(n / 1_000_000)M" }
+    else { label = "\(n)" }
+    print("  \(label.padding(toLength: 11, withPad: " ", startingAt: 0))   \(String(format: "%8.2f", ms))   \(String(format: "%5d M/s", rate))   \(String(format: "%13.2f", gbps))   \(String(format: "%12d", nGroups))")
+}
+
+// --- Section 5: Multi-core CPU vs GPU ---
 print("""
 
-  The XOR-fold is associative and commutative — the GPU can partition
-  samples across any number of threadgroups and the fingerprint is
-  identical. This is the GPU proof of the embarrassingly parallel property.
+  MULTI-CORE CPU (GCD) vs GPU
+  Fair comparison: GCD concurrentPerform with all cores vs Metal compute.
+""")
 
-  Epoch ladder on GPU:
-    flick (705.6M ticks/s) — all audio/video rates, u64 arithmetic
-    E1 (141.12M ticks/s) — trit-tick, GF(3)-aware, u64
-    E2/E3 — u128, would need emulated 128-bit on GPU (future work)
-    Unbounded — monzo vectors, CPU-side prime registration
+let cores = ProcessInfo.processInfo.activeProcessorCount
+
+func cpuGCDXOR(_ seed: UInt64, _ n: Int, _ threads: Int) -> UInt32 {
+    let chunk = n / threads
+    let partials = UnsafeMutablePointer<UInt32>.allocate(capacity: threads)
+    defer { partials.deallocate() }
+    partials.initialize(repeating: 0, count: threads)
+    DispatchQueue.concurrentPerform(iterations: threads) { tid in
+        let start = tid * chunk
+        let end = tid == threads - 1 ? n : (tid + 1) * chunk
+        var xor: UInt32 = 0
+        for i in start..<end { xor ^= extractRGB(sm64(seed, UInt64(i))) }
+        partials[tid] = xor
+    }
+    var combined: UInt32 = 0
+    for i in 0..<threads { combined ^= partials[i] }
+    return combined
+}
+
+print("  Cores: \(cores)")
+print("  N            GPU ms     GPU M/s    GCD ms     GCD M/s    Speedup   Match")
+print("  ----------   --------   --------   --------   --------   -------   -----")
+
+for n in [10_000_000, 100_000_000, 500_000_000] {
+    _ = gpuXOR(device: device, pipe: xorPipe, queue: queue, seed: SEED, n: 1000)
+    let gpu = gpuXOR(device: device, pipe: xorPipe, queue: queue, seed: SEED, n: n)
+    _ = cpuGCDXOR(SEED, 1000, cores)
+    let t0 = DispatchTime.now().uptimeNanoseconds
+    let cpuRef = cpuGCDXOR(SEED, n, cores)
+    let cpuNs = DispatchTime.now().uptimeNanoseconds - t0
+    let gpuMs = Double(gpu.ns) / 1e6
+    let cpuMs = Double(cpuNs) / 1e6
+    let gpuRate = gpu.ns == 0 ? 0 : Int(Double(n) / Double(gpu.ns) * 1000)
+    let cpuRate = cpuNs == 0 ? 0 : Int(Double(n) / Double(cpuNs) * 1000)
+    let speedup = cpuMs > 0 ? gpuMs > 0 ? cpuMs / gpuMs : 0.0 : 0.0
+    let match = gpu.xor == cpuRef ? "PASS" : "FAIL"
+    let label = n >= 1_000_000_000 ? "\(n / 1_000_000_000)B" : "\(n / 1_000_000)M"
+    print("  \(label.padding(toLength: 10, withPad: " ", startingAt: 0))   \(String(format: "%7.2f", gpuMs))   \(String(format: "%5d M/s", gpuRate))   \(String(format: "%7.2f", cpuMs))   \(String(format: "%5d M/s", cpuRate))   \(String(format: "%5.2f", speedup))x   \(match)")
+}
+
+// --- Section 6: BCI long-duration simulations ---
+print("""
+
+  BCI LONG-DURATION: GPU colors for clinical recordings
+  1 hour of continuous data at various sample rates.
+""")
+print("  Device                     Samples/hr     GPU ms     M/s        Match")
+print("  -------------------------  ----------   --------   --------   -----")
+
+let bciLong: [(String, UInt64, UInt64)] = [
+    ("OpenBCI Cyton 250 Hz",    250,   FLICK / 250),
+    ("BioSemi 2048 Hz (E2)",    2048,  0),
+    ("actiCHamp+ 5000 Hz",      5000,  FLICK / 5000),
+    ("Neuropixels AP 30 kHz",   30000, FLICK / 30000),
+    ("CD audio 44.1 kHz",       44100, FLICK / 44100),
+]
+
+for (name, rate, tps) in bciLong {
+    let nSamples = Int(rate) * 3600
+    if tps == 0 {
+        // Rate doesn't divide flick — needs E2, skip GPU (u64 only)
+        print("  \(name.padding(toLength: 25, withPad: " ", startingAt: 0))  \(String(format: "%10d", nSamples))   (needs E2 u128 — CPU only)")
+        continue
+    }
+    _ = gpuBCIXOR(device: device, pipe: bciPipe, queue: queue,
+                  seed: SEED, nSamples: 100, ticksPerSample: tps)
+    let gpu = gpuBCIXOR(device: device, pipe: bciPipe, queue: queue,
+                        seed: SEED, nSamples: nSamples, ticksPerSample: tps)
+    let cpuRef = cpuBCIXOR(SEED, nSamples, tps)
+    let ms = Double(gpu.ns) / 1e6
+    let rate2 = gpu.ns == 0 ? 0 : Int(Double(nSamples) / Double(gpu.ns) * 1000)
+    let match = gpu.xor == cpuRef ? "PASS" : "FAIL"
+    print("  \(name.padding(toLength: 25, withPad: " ", startingAt: 0))  \(String(format: "%10d", nSamples))   \(String(format: "%7.2f", ms))   \(String(format: "%5d M/s", rate2))   \(match)")
+}
+
+// --- Section 7: Bandwidth analysis ---
+print("""
+
+  BANDWIDTH ANALYSIS
+  Peak observed throughput in application terms.
+""")
+
+let peak1B = gpuXOR(device: device, pipe: xorPipe, queue: queue, seed: SEED, n: 1_000_000_000)
+let peakMs = Double(peak1B.ns) / 1e6
+let peakRate = Double(1_000_000_000) / Double(peak1B.ns) * 1000
+let peakGBps = Double(1_000_000_000) * 3.0 / Double(peak1B.ns)
+let peakBps = Double(1_000_000_000) * 8.0 * 3.0 / Double(peak1B.ns)
+
+print("  1B colors on GPU:")
+print("    Time:       \(String(format: "%.1f", peakMs)) ms")
+print("    Rate:       \(String(format: "%.0f", peakRate)) M colors/s")
+print("    Bandwidth:  \(String(format: "%.2f", peakGBps)) GB/s (RGB bytes)")
+print("    Bitrate:    \(String(format: "%.1f", peakBps)) Gbit/s")
+print()
+print("  Comparison (approximate):")
+print("    USB 3.0:        5 Gbit/s")
+print("    PCIe 4.0 x16: 256 Gbit/s")
+print("    M-series GPU memory bandwidth: ~100-400 GB/s")
+print("    This benchmark: \(String(format: "%.1f", peakGBps)) GB/s compute-bound (no memory store)")
+
+print("""
+
+  SUMMARY
+  =======
+  The embarrassingly parallel property holds across:
+    CPU scalar          → single core, sequential
+    CPU SIMD (8-wide)   → single core, pipelined
+    CPU GCD (\(cores)-core)    → OS thread pool
+    GPU Metal (Apple Silicon) → thousands of threadgroups
+  All produce identical XOR fingerprints. The GPU version
+  demonstrates this extends to massively parallel hardware.
 """)
