@@ -22,8 +22,11 @@ This is a **pure function**: no state, no side effects, no coordination. Every i
 | `spi-flicks.zig` | **Flick time base** (705.6 MHz): frame-aligned color generation, NTSC snow point demo |
 | `spi-trit-tick.zig` | **Trit-tick time base** (4 epochs): precomputed BCI device divisor tables, epoch cross-validation race, BCI snow points, cross-modal alignment |
 | `vibe_kanban.zig` | CatColab theories as SPI-indexed parallel data structures: Fokker-Planck, DAG gating, theory-typed fingerprints |
-| `spi-metal.swift` | **Metal GPU racer**: MSL compute shaders, threadgroup reduction, GPU scaling 1M-1B, BCI tick-space, multi-core CPU comparison |
-| `spi-metal-fast.swift` | **Optimized GPU**: 16 colors/thread ILP, `simd_xor` warp reduction, 1024 threadgroups, two-pass GPU reduce — **54.9 B colors/s** |
+| `spi-metal.swift` | **Metal GPU racer**: MSL compute shaders, threadgroup reduction, GPU scaling 1M-1B, BCI tick-space — **10.6 B/s** |
+| `spi-metal-fast.swift` | **Optimized GPU**: 16/thr ILP, `simd_xor` warp reduction, 1024 threadgroups, two-pass GPU reduce — **54.9 B/s** |
+| `spi-metal-ultra.swift` | **Maximum GPU**: 64/thr, 8-way ILP, branchless hot loop, fused params, N sweep — **94.7 B/s** |
+| `spi-metal-vec.swift` | **Strategy shootout**: ulong2 vectorized GPU, scalar-wide GPU comparison — ties ultra at **95.7 B/s** |
+| `spi-neon.c` | **CPU racer**: 8/16-ILP, single-core + 10-core pthreads — **12.9 B/s** multi-core |
 
 ### Multi-Language Racers
 
@@ -48,34 +51,46 @@ This is a **pure function**: no state, no side effects, no coordination. Every i
 | `build.zig` | Zig build: `libspi.{dylib,so,a}`, `spi-test`, `spi-flicks`, `spi-trit-tick`, `vibe-kanban` |
 | `build_triads.py` | Generates GF(3)-balanced triad dylibs: `lib<hex>.dylib` per color triple |
 
-## Race Results (10-core Apple Silicon M-series)
+## Race Results (Apple M5, 10-core, March 2026)
 
-| Backend | 1T (100M) | MT (1B) | Notes |
-|---------|-----------|---------|-------|
-| **Metal GPU (fast)** | **57,901 M/s** | **55,094 M/s** | 16 colors/thread, SIMD warp reduction, 1024 threadgroups |
-| Metal GPU (baseline) | 7,113 M/s | 10,507 M/s | 1 color/thread, 256 threadgroups |
-| Zig L2 | 2,902 M/s | 11,483 M/s | 8-wide unroll, ~97% of 3 GHz ceiling |
-| Julia L3 | 2,775 M/s | 10,563 M/s | `@simd` + `Threads.@threads` |
-| Swift GCD | 2,551 M/s | 9,887 M/s | GCD `concurrentPerform` |
-| Babashka L2 | 6 M/s | 13 M/s | JVM interpreter ceiling |
+| Rank | Backend | Peak M/s | Peak B/s | Notes |
+|------|---------|----------|----------|-------|
+| **1** | **Metal GPU Ultra** | **94,685** | **94.7 B** | 64/thr, 8-way ILP, branchless, fused params |
+| 2 | Metal GPU Vec2 | 95,655 | 95.7 B | ulong2 vectorized (ties ultra) |
+| 3 | Metal GPU Fast | 54,900 | 54.9 B | 16/thr, 4-way ILP, SIMD warp reduction |
+| 4 | Metal GPU Baseline | 10,600 | 10.6 B | 1/thr, CPU-side partial reduce |
+| 5 | C -O3 10-core | 12,931 | 12.9 B | 8-ILP pthreads |
+| 6 | Zig L2 10-core | ~11,500 | ~11.5 B | 8-wide unroll |
+| 7 | Julia L3 10-core | ~10,500 | ~10.5 B | `@simd` + `Threads.@threads` |
+| 8 | Swift GCD 10-core | ~9,900 | ~9.9 B | GCD `concurrentPerform` |
+| 9 | C -O3 single-core | 2,588 | 2.6 B | 8-ILP scalar |
+| 10 | Babashka | 3.2 | 0.003 B | SCI interpreter, unchecked-math |
+| 11 | Python | 2.6 | 0.003 B | CPython 3.9 scalar |
 | Python L0 | 0.3 M/s | — | CPython baseline |
 | Python FFI | 2,900 M/s | 11,000 M/s | ctypes into `libspi.dylib` — same as native |
 
-### GPU Benchmarks — Optimized (`spi-metal-fast.swift`)
+### GPU Benchmarks — Ultra (`spi-metal-ultra.swift`)
 
 | N | GPU time | GPU M/s | GB/s (3B/color) | Threadgroups |
 |---|----------|---------|-----------------|--------------|
-| 10M | 0.74 ms | 13,473 | 40.42 | 611 |
-| 100M | 3.19 ms | 31,304 | 93.91 | 6,104 |
-| 500M | 9.43 ms | 53,001 | 159.00 | 30,518 |
-| **1B** | **18.24 ms** | **54,810** | **164.43** | **61,036** |
-| **2B** | **36.42 ms** | **54,910** | **164.73** | **122,071** |
+| 100M | 2.0 ms | 49,509 | 148.5 | 1,526 |
+| **500M** | **5.3 ms** | **94,685** | **280.8** | **7,630** |
+| 1B | 11.7 ms | 85,362 | 256.1 | 15,259 |
+| 2B | 24.9 ms | 80,407 | 241.2 | 30,518 |
 
-Peak: **54.9 B colors/s**, 164.7 GB/s bandwidth, 1.3 Tbit/s bitrate (M5 Apple Silicon).
+Peak: **94.7 B colors/s**, 280.8 GB/s bandwidth (M5 Apple Silicon).
 
-GPU vs 10-core CPU (GCD): **5.8x speedup** at 1B colors (55 B/s GPU vs 9.5 B/s CPU).
+GPU vs 10-core CPU: **7.3x speedup** (95 B/s GPU vs 12.9 B/s 10-core C -O3).
+GPU vs single-core: **36.6x speedup** (95 B/s GPU vs 2.6 B/s single-core C -O3).
 
-Optimizations: 16 colors/thread with 4-way ILP, `simd_xor` warp-level reduction (no shared memory), 1024-thread threadgroups, two-pass GPU-side final reduction, best-of-3 timing.
+### GPU Optimization History
+
+| Version | Peak B/s | Improvement | Key Change |
+|---------|----------|-------------|------------|
+| spi-metal (baseline) | 10.6 | 1x | 1 color/thread, CPU partial reduce |
+| spi-metal-fast | 54.9 | 5.2x | 16/thr, SIMD warp, GPU reduce |
+| spi-metal-ultra | 94.7 | 8.9x | 64/thr, 8-way ILP, branchless |
+| spi-metal-vec (ulong2) | 95.7 | ~1x (tied) | Vector types don't help on M5 |
 
 ### GPU Benchmarks — Baseline (`spi-metal.swift`)
 
