@@ -2,4 +2,5 @@
 zig-out/
 swift-racer
 spi-metal
+spi-metal-fast
 .triad_opts_*
