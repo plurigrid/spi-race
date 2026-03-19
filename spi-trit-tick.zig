@@ -660,6 +660,69 @@ pub fn main() !void {
     // ================================================================
     // SECTION 7: The 4-mechanism summary
     // ================================================================
+    // ================================================================
+    // SECTION 8: Clock Domain Stride Verification
+    // Proves golden-stride folding is valid for all E1 rates.
+    // See spi-metal-clocks.swift for GPU proof (flick 91.3 B/s > dense 74.8 B/s).
+    // ================================================================
+    writeAll(
+        \\
+        \\  CLOCK DOMAIN STRIDES — folded golden-stride verification
+        \\  GOLDEN * (TICKS/rate) precomputed → same ALU as dense color indices.
+        \\  GPU result: flick stride BEATS dense by 22% at 500M samples.
+        \\
+    );
+
+    const clock_rates = [_]struct { hz: u64, name: []const u8 }{
+        .{ .hz = 250,   .name = "OpenBCI 250 Hz  " },
+        .{ .hz = 500,   .name = "LiveAmp 500 Hz  " },
+        .{ .hz = 2500,  .name = "NPX LFP 2500 Hz" },
+        .{ .hz = 5000,  .name = "actiCHamp 5 kHz " },
+        .{ .hz = 30000, .name = "NPX AP 30 kHz   " },
+        .{ .hz = 48000, .name = "Audio 48 kHz    " },
+    };
+
+    p("  {s: <18} {s: >12} {s: >12} {s: >6}  {s}\n", .{
+        "Device", "Flick stride", "Trit stride", "Ratio", "Fold OK",
+    });
+    p("  {s: <18} {s: >12} {s: >12} {s: >6}  {s}\n", .{
+        "──────────────────", "────────────", "────────────", "──────", "───────",
+    });
+
+    var clock_pass: u32 = 0;
+    var clock_total: u32 = 0;
+    for (clock_rates) |cr| {
+        clock_total += 1;
+        const flick_stride = FLICK / cr.hz;
+        const trit_stride = EPOCH1 / cr.hz;
+        const ratio_ok = (flick_stride == trit_stride * 5);
+
+        // Verify golden-stride fold: GOLDEN*(TICKS/rate)*k == GOLDEN*(k*TICKS/rate) for k=0..7
+        const gs_flick = GOLDEN *% flick_stride;
+        const gs_trit = GOLDEN *% trit_stride;
+        var fold_ok = true;
+        const seed: u64 = 42;
+        var k: u64 = 0;
+        while (k < 8) : (k += 1) {
+            const direct_f = seed +% GOLDEN *% (flick_stride * k);
+            const folded_f = seed +% gs_flick *% k;
+            const direct_t = seed +% GOLDEN *% (trit_stride * k);
+            const folded_t = seed +% gs_trit *% k;
+            if (direct_f != folded_f or direct_t != folded_t) fold_ok = false;
+        }
+        if (ratio_ok and fold_ok) clock_pass += 1;
+        const status = if (ratio_ok and fold_ok) "PASS" else "FAIL";
+        p("  {s: <18} {d: >12} {d: >12} {s: >6}  {s}\n", .{
+            cr.name, flick_stride, trit_stride,
+            if (ratio_ok) "5:1" else "???",
+            status,
+        });
+    }
+    p("\n  Clock domain strides: {}/{} PASS\n", .{ clock_pass, clock_total });
+
+    // ================================================================
+    // SECTION 9: The 4-mechanism summary
+    // ================================================================
     writeAll(
         \\
         \\  WHY UNUSUAL PRIMES APPEAR IN DEVICE SAMPLE RATES
